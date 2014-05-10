@@ -86,8 +86,9 @@ class ShadowsocksVpnService extends VpnService with BaseService {
   }
 
   def newProtectedSocket: Int = {
+    Log.d(TAG, "new a socket")
     val socket = new Socket
-    socket.setTcpNoDelay(false)
+    socket.setTcpNoDelay(true)
     protect(socket)
     val fileDescriptor = ParcelFileDescriptor.fromSocket(socket)
     if (fileDescriptor != null) {
@@ -102,6 +103,7 @@ class ShadowsocksVpnService extends VpnService with BaseService {
   def freeProtectedSocket(fd: Int) {
     val socket = socketMap.get(fd)
     if (socket != null) {
+      Log.d(TAG, "free a socket")
       try {
         socket.close()
       } catch {
@@ -279,6 +281,7 @@ class ShadowsocksVpnService extends VpnService with BaseService {
   /** Called when the activity is first created. */
   def handleConnection: Boolean = {
     startVpn()
+    startProtectThread()
     startShadowsocksDaemon()
     if (!config.isUdpDns) startDnsDaemon()
     true
