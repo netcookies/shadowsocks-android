@@ -103,24 +103,12 @@ class ShadowsocksNatService extends Service with BaseService {
   val handler: Handler = new Handler()
 
   def startShadowsocksDaemon() {
-    spawn {
-      val ab = new ArrayBuffer[String]
-      ab += "ss-local"
-      ab += "-b"
-      ab += "127.0.0.1"
-      ab += "-s"
-      ab += config.proxy
-      ab += "-p"
-      ab += config.remotePort.toString
-      ab += "-l"
-      ab += config.localPort.toString
-      ab += "-k"
-      ab += config.sitekey
-      ab += "-m"
-      ab += config.encMethod
-      ab += "f"
-      Daemon.exec(ab.toArray)
-    }
+    val cmd = (Path.BASE +
+      "ss-local -b 127.0.0.1 -s \"%s\" -p \"%d\" -l \"%d\" -k \"%s\" -m \"%s\" -f " +
+      Path.BASE + "ss-local.pid")
+      .format(config.proxy, config.remotePort, config.localPort, config.sitekey, config.encMethod)
+    if (BuildConfig.DEBUG) Log.d(TAG, cmd)
+    System.exec(cmd)
   }
 
   def startDnsDaemon() {
@@ -296,6 +284,8 @@ class ShadowsocksNatService extends Service with BaseService {
 
     ab.clear()
 
+    ab.append("kill -9 `cat " + Path.BASE + "ss-local.pid`")
+    ab.append("killall -9 ss-local")
     ab.append("kill -9 `cat " + Path.BASE + "ss-tunnel.pid`")
     ab.append("killall -9 ss-tunnel")
     ab.append("kill -15 `cat " + Path.BASE + "pdnsd.pid`")

@@ -163,7 +163,7 @@ LOCAL_STATIC_LIBRARIES := libev libcrypto libipset libcork
 
 LOCAL_LDLIBS := -llog
 
-include $(BUILD_SHARED_LIBRARY)
+include $(BUILD_EXECUTABLE)
 
 ########################################################
 ## shadowsocks tunnel

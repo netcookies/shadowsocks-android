@@ -47,7 +47,7 @@ import android.os._
 import android.support.v4.app.NotificationCompat
 import android.util.{SparseArray, Log}
 import com.google.analytics.tracking.android.{Fields, MapBuilder, EasyTracker}
-import android.net.VpnService
+import android.net.{LocalServerSocket, VpnService}
 import org.apache.http.conn.util.InetAddressUtils
 import android.os.Message
 import scala.concurrent.ops._
@@ -58,24 +58,47 @@ import scala.Some
 import com.github.shadowsocks.aidl.{IShadowsocksService, Config}
 import scala.collection.mutable.ArrayBuffer
 import java.io.{IOException, File}
+import java.nio._
+import scala.Some
+import com.github.shadowsocks.ProxiedApp
 
-object ShadowsocksVpnService {
-  def newProtectedSocket: Int = {
-    if (Instance != null) {
-      val socket = new Socket
-      socket.setTcpNoDelay(false)
-      Instance.protect(socket)
-      val fileDescriptor = ParcelFileDescriptor.fromSocket(socket)
-      if (fileDescriptor != null) {
-        val fd = fileDescriptor.getFd
-        socketMap.put(fd, socket)
-        return fd
-      } else {
-        return -1
-      }
-    }
-    -1
+class ShadowsocksVpnService extends VpnService with BaseService {
+
+  val TAG = "ShadowsocksVpnService"
+  val VPN_MTU = 1500
+  val PRIVATE_VLAN = "26.26.26.%s"
+  val NEW_SOCKET = "new_socket"
+  val FREE_SOCKET = "free_socket"
+
+  var conn: ParcelFileDescriptor = null
+  var notificationManager: NotificationManager = null
+  var receiver: BroadcastReceiver = null
+  var apps: Array[ProxiedApp] = null
+  var config: Config = null
+  val handler: Handler = new Handler()
+  val socketMap: SparseArray[Socket] = new SparseArray[Socket]
+
+  var isRunning = true
+
+  def isByass(net: SubnetUtils): Boolean = {
+    val info = net.getInfo
+    info.isInRange("114.114.114.114") || info.isInRange("114.114.115.115")
   }
+
+  def newProtectedSocket: Int = {
+    val socket = new Socket
+    socket.setTcpNoDelay(false)
+    protect(socket)
+    val fileDescriptor = ParcelFileDescriptor.fromSocket(socket)
+    if (fileDescriptor != null) {
+      val fd = fileDescriptor.getFd
+      socketMap.put(fd, socket)
+      fd
+    } else {
+      -1
+    }
+  }
+
   def freeProtectedSocket(fd: Int) {
     val socket = socketMap.get(fd)
     if (socket != null) {
@@ -87,52 +110,51 @@ object ShadowsocksVpnService {
     }
   }
 
-  var socketMap: SparseArray[Socket] = new SparseArray[Socket]
-  var Instance: ShadowsocksVpnService = null
-}
+  def startProtectThread() {
+    val localNewServer = new LocalServerSocket(NEW_SOCKET)
+    val localFreeServer = new LocalServerSocket(FREE_SOCKET)
 
-class ShadowsocksVpnService extends VpnService with BaseService {
+    spawn {
+      while (isRunning) {
+        val sender = localNewServer.accept()
+        val out = sender.getOutputStream
+        val bb = ByteBuffer.allocate(4)
 
-  val TAG = "ShadowsocksVpnService"
+        bb.order(ByteOrder.nativeOrder())
+        bb.putInt(newProtectedSocket)
+        out.write(bb.array())
 
-  val VPN_MTU = 1500
+        out.flush()
+        out.close()
+        sender.close()
+      }
+    }
 
-  val PRIVATE_VLAN = "26.26.26.%s"
+    spawn {
+      while (isRunning) {
+        val receiver = localFreeServer.accept()
+        val in = receiver.getInputStream
+        val buffer = new Array[Byte](256)
 
-  var conn: ParcelFileDescriptor = null
-  var notificationManager: NotificationManager = null
-  var receiver: BroadcastReceiver = null
-  var apps: Array[ProxiedApp] = null
-  var config: Config = null
+        in.read(buffer)
+        val bb = ByteBuffer.wrap(buffer)
+        bb.order(ByteOrder.nativeOrder())
+        val fd = bb.getInt
+        freeProtectedSocket(fd)
 
-  val handler: Handler = new Handler()
-
-  def isByass(net: SubnetUtils): Boolean = {
-    val info = net.getInfo
-    info.isInRange("114.114.114.114") || info.isInRange("114.114.115.115")
+        in.close()
+        receiver.close()
+      }
+    }
   }
 
   def startShadowsocksDaemon() {
-    spawn {
-      val ab = new ArrayBuffer[String]
-      ab += "ss-local"
-      ab += "-b"
-      ab += "127.0.0.1"
-      ab += "-s"
-      ab += config.proxy
-      ab += "-p"
-      ab += config.remotePort.toString
-      ab += "-l"
-      ab += config.localPort.toString
-      ab += "-k"
-      ab += config.sitekey
-      ab += "-m"
-      ab += config.encMethod
-      ab += "-u"
-      ab += "--protect-socket"
-      if (BuildConfig.DEBUG) Log.d(TAG, ab.mkString(" "))
-      Daemon.exec(ab.toArray)
-    }
+    val cmd: String = (Path.BASE +
+      "ss-local -b 127.0.0.1 -s \"%s\" -p \"%d\" -l \"%d\" -k \"%s\" -m \"%s\" -u --protect-socket -f " +
+      Path.BASE + "ss-local.pid")
+      .format(config.proxy, config.remotePort, config.localPort, config.sitekey, config.encMethod)
+    if (BuildConfig.DEBUG) Log.d(TAG, cmd)
+    System.exec(cmd)
   }
 
   def startDnsDaemon() {
@@ -291,13 +313,13 @@ class ShadowsocksVpnService extends VpnService with BaseService {
   override def onDestroy() {
     super.onDestroy()
 
-    ShadowsocksVpnService.Instance = null
+    isRunning = false
   }
 
   override def onCreate() {
     super.onCreate()
 
-    ShadowsocksVpnService.Instance = this
+    isRunning = true
 
     ConfigUtils.refresh(this)
 
@@ -313,6 +335,8 @@ class ShadowsocksVpnService extends VpnService with BaseService {
   def killProcesses() {
     val ab = new ArrayBuffer[String]
 
+    ab.append("kill -9 `cat " + Path.BASE + "ss-local.pid`")
+    ab.append("killall -9 ss-local")
     ab.append("kill -9 `cat " + Path.BASE + "tun2socks.pid`")
     ab.append("killall -9 tun2socks")
     ab.append("kill -15 `cat " + Path.BASE + "pdnsd.pid`")
